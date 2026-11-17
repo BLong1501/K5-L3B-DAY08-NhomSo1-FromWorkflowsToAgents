@@ -25,7 +25,7 @@ Gợi ý chia vai:
 
 | Người | Vai | Commit | Test đã thêm hoặc sửa |
 | --- | --- | --- | --- |
-| | | | |
+| Cao Duy Minh | orchestrator + handoff; README kiến trúc | `0498ae4`, `abc0639`, `efee6a3` | `src/tests/test_orchestrator_boundary.py` |
 
 ## Cá nhân
 

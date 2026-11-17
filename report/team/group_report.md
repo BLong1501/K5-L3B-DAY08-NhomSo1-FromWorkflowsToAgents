@@ -22,7 +22,14 @@ Cả ba kiến trúc nhóm viết đều tuân thủ nghiêm ngặt ranh giới 
 
 - **Shape A — `workflow` (`src/lab8/shapes/workflow.py`):** Thực thi theo pipeline Python cố định: đọc claim view → kiểm tra `order_id` (thiếu trả `needs_info`) → gọi `lookup_order` (không thấy/sai principal trả `escalated`) → lọc policy hiện hành (`is_current`) và tính tiền bằng `compute_compensation` → nếu `quote == 0` trả `denied`, nếu `quote > 0` gọi `durability.issue_refund(..., crash_at=crash_at)` với quote đầy đủ và không nuốt `InjectedCrash`.
 - **Shape B — `single` (`src/lab8/shapes/single.py`):** Vòng lặp ReAct tối đa 8 bước với `MockLLM` chỉ được gọi tool đọc (`lookup_order`, `lookup_policy`, `lookup_refund_history`, `compute_compensation`). Sau vòng lặp, code của shape tự kiểm chứng kết quả và gọi `durability.issue_refund` với quote đầy đủ.
-- **Shape C — `orchestrator` (`src/lab8/shapes/orchestrator.py`):** Orchestrator tạo gói `handoff.v1` qua `lab8.handoff.make_handoff` chỉ gồm các field allowlist và cấp quyền tool chỉ đọc cho investigator; toàn bộ `parent_secret`, `raw_headers_json`, PII (`phone`, địa chỉ, `item_name`, `internal_note`) bị loại bỏ trước khi chuyển giao và không ghi vào trace.
+- **Shape C — `orchestrator` (`src/lab8/shapes/orchestrator.py`):**
+  - **Chuẩn bị:** orchestrator đọc claim qua `get_claim_view`; thiếu `order_id` thì trả `needs_info` ngay, không giao việc. Model được gọi một lần để lập kế hoạch.
+  - **Handoff:** orchestrator tạo gói `handoff.v1` bằng `lab8.handoff.make_handoff` với `facts={}`, tức không chuyển dữ kiện nào từ ngữ cảnh của mình. Gói chỉ gồm field trong allowlist và cấp 4 tool chỉ đọc: `lookup_order`, `lookup_policy`, `lookup_refund_history`, `compute_compensation`.
+  - **Điều tra:** `run_readonly_investigators` chạy hết danh sách tool rồi báo kết quả về.
+  - **Quyết định:** orchestrator trả `escalated` nếu không phải chủ đơn, `denied` nếu quote bằng 0. Nếu quote lớn hơn 0, orchestrator gọi `durability.issue_refund` với quote đầy đủ và `crash_at`, không bắt `InjectedCrash`.
+  - **Bảo mật:** `parent_secret`, `raw_headers_json`, ticket và PII (`phone`, địa chỉ, `item_name`, `internal_note`) không đi qua handoff. Trace chỉ ghi handoff đã sanitize và 7 field đơn hàng trong allowlist. Lời gọi model không chứa ticket.
+  - **Chi phí:** orchestrator đắt nhất (57,04 VND/success) dù chỉ khoảng 1,9 lời gọi model mỗi claim. Theo bảng giá mô phỏng, phần lớn chi phí là tool call (10 VND/lần). Investigator đọc lại claim view và chạy hết 4 tool trong handoff mà không dừng sớm, trung bình khoảng 5,6 tool call mỗi claim.
+  - Sơ đồ chi tiết: [README_architecture.md](../../README_architecture.md).
 
 ## 4. Kết quả
 

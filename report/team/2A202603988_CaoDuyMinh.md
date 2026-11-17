@@ -93,9 +93,29 @@ Trên bộ hidden (`src/reports/hidden_selfcheck.json`, 40 claim × 5 seed, nhó
   - đọc file trace của một claim để chắc chỉ có handoff đã sanitize và field trong allowlist;
   - đối chiếu từng nhánh `status` với bảng output contract trong `docs/contracts.md`.
 - Không dùng AI để tạo số liệu benchmark, run id hay commit. Mọi số liệu ở mục 4 lấy từ output lệnh thật.
+- Mục 6 được soạn với sự hỗ trợ của Claude Code, dựa trên các việc và số liệu có thật trong buổi lab.
 
 ## 6. Tự đánh giá
 
-<!-- Phần này tôi tự viết (RULES.md: không dùng AI để viết phần tự đánh giá). Gợi ý: điều đã hiểu về ranh giới code / model, điều còn chưa chắc, nếu làm lại sẽ đổi gì. -->
+**Đã làm được:**
 
-...
+- Shape C qua đủ 62 test student và crash suite 20/20.
+- Trên bộ hidden, shape C không lỗi, không nghi lộ secret, và ra cùng kết quả với workflow, single ở mọi claim.
+- Tôi tự giải thích được ranh giới code / model trong shape của mình: tiền do `compute_compensation` tính, approval và trần theo đơn do host quyết, model chỉ lập kế hoạch và soạn chữ.
+- Hiểu vì sao phải truyền quote đầy đủ (T13, T14), và vì sao handoff phải lọc bằng allowlist chứ không bằng tóm tắt của LLM.
+
+**Điều học được khi so sánh ba shape:**
+
+- Ba shape khác nhau ở chỗ ai quyết định bước tiếp theo, không phải ở tool nào được gọi.
+- Ví dụ rõ nhất là C-005. Single dừng ngay sau tra đơn vì model quan sát rồi mới chọn. Orchestrator vẫn tra policy và lịch sử hoàn, vì danh sách việc đã giao trọn trong handoff từ trước.
+- Tôi cũng nhận ra chi phí trong lab chủ yếu đến từ tool call (10 VND/lần), không phải lời gọi model. Vì vậy orchestrator đắt nhất dù gọi model ít hơn swarm.
+
+**Còn chưa chắc / hạn chế:**
+
+- MockLLM không suy luận thật. Vì vậy kết luận "orchestrator chỉ thêm chi phí" có thể khác khi dùng LLM thật: khi đó lời gọi model đắt hơn tool call nhiều lần.
+- Bộ hidden không có nhãn, nên tôi chưa biết pass rate thật của shape C.
+
+**Nếu làm lại:**
+
+- Tôi sẽ cho orchestrator dừng sớm khi investigator báo đơn không thuộc người gửi, để bớt các tool call thừa như ở C-005. Cách làm là giao việc theo hai đợt: tra đơn trước, các tool còn lại sau.
+- Tôi sẽ viết test cho nhánh crash riêng của orchestrator thay vì chỉ dựa vào ma trận chung.
