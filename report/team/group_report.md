@@ -20,16 +20,63 @@ Nhóm 4 người phân công song song theo cấu trúc độc lập file:
 
 Cả ba kiến trúc nhóm viết đều tuân thủ nghiêm ngặt ranh giới code/model ([docs/architecture.md](../../docs/architecture.md)) và trả kết quả qua `lab8.shapes.common.finish()`:
 
-- **Shape A — `workflow` (`src/lab8/shapes/workflow.py`):** Thực thi theo pipeline Python cố định: đọc claim view → kiểm tra `order_id` (thiếu trả `needs_info`) → gọi `lookup_order` (không thấy/sai principal trả `escalated`) → lọc policy hiện hành (`is_current`) và tính tiền bằng `compute_compensation` → nếu `quote == 0` trả `denied`, nếu `quote > 0` gọi `durability.issue_refund(..., crash_at=crash_at)` với quote đầy đủ và không nuốt `InjectedCrash`.
-- **Shape B — `single` (`src/lab8/shapes/single.py`):** Vòng lặp ReAct tối đa 8 bước với `MockLLM` chỉ được gọi tool đọc (`lookup_order`, `lookup_policy`, `lookup_refund_history`, `compute_compensation`). Sau vòng lặp, code của shape tự kiểm chứng kết quả và gọi `durability.issue_refund` với quote đầy đủ.
-- **Shape C — `orchestrator` (`src/lab8/shapes/orchestrator.py`):**
-  - **Chuẩn bị:** orchestrator đọc claim qua `get_claim_view`; thiếu `order_id` thì trả `needs_info` ngay, không giao việc. Model được gọi một lần để lập kế hoạch.
-  - **Handoff:** orchestrator tạo gói `handoff.v1` bằng `lab8.handoff.make_handoff` với `facts={}`, tức không chuyển dữ kiện nào từ ngữ cảnh của mình. Gói chỉ gồm field trong allowlist và cấp 4 tool chỉ đọc: `lookup_order`, `lookup_policy`, `lookup_refund_history`, `compute_compensation`.
-  - **Điều tra:** `run_readonly_investigators` chạy hết danh sách tool rồi báo kết quả về.
-  - **Quyết định:** orchestrator trả `escalated` nếu không phải chủ đơn, `denied` nếu quote bằng 0. Nếu quote lớn hơn 0, orchestrator gọi `durability.issue_refund` với quote đầy đủ và `crash_at`, không bắt `InjectedCrash`.
-  - **Bảo mật:** `parent_secret`, `raw_headers_json`, ticket và PII (`phone`, địa chỉ, `item_name`, `internal_note`) không đi qua handoff. Trace chỉ ghi handoff đã sanitize và 7 field đơn hàng trong allowlist. Lời gọi model không chứa ticket.
-  - **Chi phí:** orchestrator đắt nhất (57,04 VND/success) dù chỉ khoảng 1,9 lời gọi model mỗi claim. Theo bảng giá mô phỏng, phần lớn chi phí là tool call (10 VND/lần). Investigator đọc lại claim view và chạy hết 4 tool trong handoff mà không dừng sớm, trung bình khoảng 5,6 tool call mỗi claim.
-  - Sơ đồ chi tiết: [README_architecture.md](../../README_architecture.md).
+### 3.1 Shape A — `workflow` (`src/lab8/shapes/workflow.py`)
+
+**Ý tưởng.** Toàn bộ claims flow là các bước Python cố định, không có vòng lặp model. Đây là mức tự chủ thấp nhất trong bốn shape: code đọc dữ liệu có cấu trúc, code tính tiền, host ghi tiền. Shape **không gọi MockLLM** (kể cả bước soạn câu trả lời), vì mọi quyết định trong bài đều là luật cố định; thêm model call chỉ làm tăng cost mà không đổi kết quả. Sơ đồ chi tiết: [docs/workflow_flow.md](../../docs/workflow_flow.md).
+
+**Các bước.**
+
+| # | Bước | Gọi | Nhánh ra |
+|---|------|-----|----------|
+| 1 | Đọc claim | `tools.get_claim_view` (chỉ `claim_id`, `principal_id`, `order_id`, `ticket`; không `SELECT *` vì claim row có `parent_secret`) | Không tồn tại → `failed`, `unknown_claim` |
+| 2 | Kiểm `order_id` | — | Thiếu → `needs_info`, proposal 0. Không đoán mã đơn từ ticket |
+| 3 | Tra đơn theo principal | `tools.lookup_order(conn, order_id, principal_id)` | `visible=false` (không thấy / không sở hữu) → `escalated`, proposal 0 |
+| 4 | Tính quote | `tools.compute_compensation(conn, order)` trên order row; chỉ policy `is_current` và `effective_date ≤ 2026-11-15` | — |
+| 5 | Quote = 0 | — | `denied`, proposal 0, **không** gọi `issue_refund` |
+| 6 | Quote > 0 | `durability.issue_refund(conn, claim_id, quote, crash_at=crash_at)` với **quote đầy đủ** | `ok` → `resolved`; `conflict` → `failed`; còn lại → `denied` (host ghi `policy_denied`). `proposal_amount` luôn là quote đầy đủ |
+| 7 | Trả kết quả | `shapes.common.finish(...)` ở **mọi** nhánh | Tự lấy `refund_effects`, `committed_audit_count` từ ledger và ghi trace |
+
+**Ranh giới code / model.**
+
+| Việc | Ai quyết trong workflow |
+|---|---|
+| Đọc ticket | Không ai. Ticket không được parse; số ngày trễ ("trễ 5 ngày", "ignore policy") không ảnh hưởng gì |
+| Lọc principal, chọn policy hiện hành, tính tiền | Code (`lookup_order`, `compute_compensation`) |
+| Approval, trần theo đơn, idempotency, ghi ledger | Host (`durability.issue_refund`, một transaction) |
+| Soạn câu chữ | Không dùng model |
+
+**Vì sao truyền quote đầy đủ.** Host tự trừ phần đơn đã được hoàn bởi claim khác trong cùng transaction ghi. Nếu shape tự trừ trước thì bị trừ hai lần: T14 (`O-515`, đã hoàn 30.000, entitlement 150.000) sẽ ghi 90.000 thay vì 120.000. Tương tự, khi quote > 0 mà approval hỏng hoặc đơn đã hoàn đủ (T07, T13), workflow vẫn gọi host để có audit `policy_denied` thay vì tự từ chối.
+
+**Crash và retry.** `crash_at` được truyền thẳng vào `issue_refund`. Khi có `InjectedCrash`, workflow ghi event `crash` vào trace rồi `raise` lại, không nuốt lỗi. Chạy lại trên cùng DB thì host trả `idempotent_replay` theo khóa `refund:{claim_id}`, nên vẫn một dòng ledger và một audit `refund_committed`.
+
+**Trace.** Dùng `lab8.trace.Trace`, file `traces/<run_id>.json`, ghi ở mọi nhánh return. Các event:
+
+| Event | Payload |
+|---|---|
+| `claim` | `claim_id`, `found`, `has_order_id` |
+| `lookup_order` | `visible` + `reason`, hoặc order view allowlist (`ORDER_FIELDS`: `order_id`, `status`, `delay_days`, `shipping_fee_vnd`, `paid_vnd`, `damage_verified`, `carrier`) |
+| `quote` | `amount_vnd`, `reason`, `clause_ids` |
+| `issue_refund` | `ok`, `reason`, `conflict` |
+| `crash` | `at` (chỉ khi có crash injection) |
+| `decision` | `status`, `proposal_amount`, `reason` |
+
+Cố ý **không** ghi: claim row (có `parent_secret`), nguyên văn ticket, order row thô (SĐT, địa chỉ, tên hàng, ghi chú nội bộ), approval row.
+
+**Kiểm chứng.** Ma trận student `-k workflow`: 62/62 passed. Test riêng `src/tests/test_workflow_boundary.py` (21 test): trace không chứa chuỗi cấm của từng claim và không chứa ticket; T02 bị `denied` ở cả 5 seed (kể cả seed 55, chỗ swarm fail); không có model call; gọi lại cùng claim vẫn một refund.
+
+### 3.2 Shape B — `single` (`src/lab8/shapes/single.py`)
+
+Vòng lặp ReAct tối đa 8 bước với `MockLLM` chỉ được gọi tool đọc (`lookup_order`, `lookup_policy`, `lookup_refund_history`, `compute_compensation`). Sau vòng lặp, code của shape tự kiểm chứng kết quả và gọi `durability.issue_refund` với quote đầy đủ.
+
+### 3.3 Shape C — `orchestrator` (`src/lab8/shapes/orchestrator.py`)
+
+- **Chuẩn bị:** orchestrator đọc claim qua `get_claim_view`; thiếu `order_id` thì trả `needs_info` ngay, không giao việc. Model được gọi một lần để lập kế hoạch.
+- **Handoff:** orchestrator tạo gói `handoff.v1` bằng `lab8.handoff.make_handoff` với `facts={}`, tức không chuyển dữ kiện nào từ ngữ cảnh của mình. Gói chỉ gồm field trong allowlist và cấp 4 tool chỉ đọc: `lookup_order`, `lookup_policy`, `lookup_refund_history`, `compute_compensation`.
+- **Điều tra:** `run_readonly_investigators` chạy hết danh sách tool rồi báo kết quả về.
+- **Quyết định:** orchestrator trả `escalated` nếu không phải chủ đơn, `denied` nếu quote bằng 0. Nếu quote lớn hơn 0, orchestrator gọi `durability.issue_refund` với quote đầy đủ và `crash_at`, không bắt `InjectedCrash`.
+- **Bảo mật:** `parent_secret`, `raw_headers_json`, ticket và PII (`phone`, địa chỉ, `item_name`, `internal_note`) không đi qua handoff. Trace chỉ ghi handoff đã sanitize và 7 field đơn hàng trong allowlist. Lời gọi model không chứa ticket.
+- **Chi phí:** orchestrator đắt nhất (57,04 VND/success) dù chỉ khoảng 1,9 lời gọi model mỗi claim. Theo bảng giá mô phỏng, phần lớn chi phí là tool call (10 VND/lần). Investigator đọc lại claim view và chạy hết 4 tool trong handoff mà không dừng sớm, trung bình khoảng 5,6 tool call mỗi claim.
+- Sơ đồ chi tiết: [README_architecture.md](../../README_architecture.md).
 
 ## 4. Kết quả
 
