@@ -5,7 +5,7 @@
 - Tên nhóm: NhomSo1
 - Lớp: L3B
 - Repo nhóm: `K5-L3B-DAY08-NhomSo1-FromWorkflowsToAgents` (xem [SUBMISSION.md](SUBMISSION.md))
-- URL repo, nhánh nộp, commit chốt: `https://github.com/BLong1501/K5-L3B-DAY08-NhomSo1-FromWorkflowsToAgents`, nhánh `main`, commit chốt `9ad2cc7`
+- URL repo, nhánh nộp, commit chốt: `https://github.com/BLong1501/K5-L3B-DAY08-NhomSo1-FromWorkflowsToAgents`, nhánh `main`, commit chốt `ea96d91`
 
 ## Thành viên
 
